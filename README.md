@@ -4,6 +4,8 @@
 
 This repository contains the code for fine-tuning the [Wav2Vec Bert 2.0](https://huggingface.co/facebook/w2v-bert-2.0) model on the Common Voice 17 Cantonese dataset for Jyutping recognition. The model is trained on the [Common Voice 17 Cantonese dataset](https://huggingface.co/datasets/mozilla-foundation/common_voice_17_0).
 
+The weights can be found on [Huggingface](https://huggingface.co/hon9kon9ize/wav2vec2bert-jyutping)
+
 ## Requirements
 
 To install the required packages, run the following command:
