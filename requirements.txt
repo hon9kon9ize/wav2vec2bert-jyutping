@@ -3,3 +3,5 @@ jiwer
 pycantonese
 numpy
 wandb
+librosa
+soundfile
