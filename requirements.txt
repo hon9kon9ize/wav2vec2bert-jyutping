@@ -2,3 +2,4 @@ transformers
 jiwer
 pycantonese
 numpy
+wandb
