@@ -1,4 +1,4 @@
 transformers
-jiewer
+jiwer
 pycantonese
 numpy
