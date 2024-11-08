@@ -1,7 +1,7 @@
 import os
 import argparse
-from model import Wav2Vec2BertForCantonese
-from data import DataCollatorCTCWithPadding
+from model import Wav2Vec2ConformerForCantonese
+from data import Wav2Vec2DataCollatorCTCWithPadding
 from datasets import load_metric, load_from_disk
 import time
 from transformers import (
@@ -9,8 +9,8 @@ from transformers import (
     TrainingArguments,
     AddedToken,
     Trainer,
-    Wav2Vec2BertProcessor,
-    SeamlessM4TFeatureExtractor,
+    Wav2Vec2Processor,
+    Wav2Vec2FeatureExtractor,
 )
 import numpy as np
 
@@ -28,7 +28,7 @@ def train(model_id: str, dataset: str, output_dir: str):
     tokenizer = Wav2Vec2CTCTokenizer(
         "vocab.json", unk_token="[UNK]", pad_token="[PAD]", word_delimiter_token="|"
     )
-    tone_tokens = Wav2Vec2CTCTokenizer(
+    tone_tokenizer = Wav2Vec2CTCTokenizer(
         "tone_vocab.json",
         unk_token="[UNK]",
         pad_token="[PAD]",
@@ -41,28 +41,35 @@ def train(model_id: str, dataset: str, output_dir: str):
             tokenizer._added_tokens_decoder[idx] = AddedToken(
                 key, lstrip=False, rstrip=False
             )
-    for key in tone_tokens.get_vocab().keys():
-        if key not in tone_tokens.special_tokens_map.values():
-            idx = tone_tokens.get_vocab()[key]
-            tone_tokens._added_tokens_decoder[idx] = AddedToken(
+    for key in tone_tokenizer.get_vocab().keys():
+        if key not in tone_tokenizer.special_tokens_map.values():
+            idx = tone_tokenizer.get_vocab()[key]
+            tone_tokenizer._added_tokens_decoder[idx] = AddedToken(
                 key, lstrip=False, rstrip=False
             )
 
     # load processor
-    feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained(model_id)
-    processor = Wav2Vec2BertProcessor(
+    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
+    processor = Wav2Vec2Processor(
         feature_extractor=feature_extractor, tokenizer=tokenizer
     )
 
+    def prepare_dataset(batch):
+        audio = batch["audio"]
+        batch["input_values"] = processor(
+            audio["array"], sampling_rate=audio["sampling_rate"]
+        ).input_values[0]
+        batch["input_lengths"] = len(batch["input_values"])
+        batch["jyutping_labels"] = processor(text=batch["jyutping"]).input_ids
+        batch["tone_labels"] = tone_tokenizer.encode(text=batch["tone"])
+
+        return batch
+
+    ds = ds.map(prepare_dataset, num_proc=16)
+
     # load model
-    model = Wav2Vec2BertForCantonese.from_pretrained(
+    model = Wav2Vec2ConformerForCantonese.from_pretrained(
         model_id,
-        attention_dropout=0.2,
-        hidden_dropout=0.2,
-        feat_proj_dropout=0.0,
-        mask_time_prob=0.0,
-        layerdrop=0.0,
-        add_adapter=True,
         ctc_loss_reduction="mean",
         pad_token_id=processor.tokenizer.pad_token_id,
         vocab_size=len(processor.tokenizer),
@@ -70,11 +77,13 @@ def train(model_id: str, dataset: str, output_dir: str):
     model.config.update(
         {
             "vocab_size": len(tokenizer),
-            "tone_vocab_size": len(tone_tokens),
+            "tone_vocab_size": len(tone_tokenizer),
         }
     )
 
-    data_collator = DataCollatorCTCWithPadding(processor=processor, padding=True)
+    data_collator = Wav2Vec2DataCollatorCTCWithPadding(
+        processor=processor, padding=True
+    )
     tone_tokenizer = Wav2Vec2CTCTokenizer(
         "tone_vocab.json",
         unk_token="[UNK]",
@@ -99,7 +108,9 @@ def train(model_id: str, dataset: str, output_dir: str):
         jyutping_label_str = processor.batch_decode(
             pred.label_ids[0], group_tokens=False
         )
-        tone_label_str = tone_tokens.batch_decode(pred.label_ids[1], group_tokens=False)
+        tone_label_str = tone_tokenizer.batch_decode(
+            pred.label_ids[1], group_tokens=False
+        )
 
         jyutping_wer = wer_metric.compute(
             predictions=jyutping_pred_str, references=jyutping_label_str
@@ -114,17 +125,18 @@ def train(model_id: str, dataset: str, output_dir: str):
         output_dir=output_dir,
         label_names=["jyutping_labels", "tone_labels"],
         group_by_length=True,
-        per_device_train_batch_size=16,
-        gradient_accumulation_steps=2,
+        per_device_train_batch_size=128,
+        per_device_eval_batch_size=64,
+        gradient_accumulation_steps=1,
         eval_strategy="steps",
         num_train_epochs=30,
         bf16=True,
         gradient_checkpointing=True,
-        overwrite_output_dir=False,  # set to False to continue training
+        overwrite_output_dir=True,  # set to False to continue training
         save_steps=1000,
         eval_steps=1000,
         logging_steps=100,
-        learning_rate=1e-4,
+        learning_rate=5e-4,
         weight_decay=0.005,
         warmup_steps=1000,
         save_total_limit=2,
@@ -145,14 +157,15 @@ def train(model_id: str, dataset: str, output_dir: str):
         processing_class=processor,
     )
 
-    # trainer.evaluate()
     trainer.train()
 
 
 if __name__ == "__main__":
     args = argparse.ArgumentParser()
     args.add_argument("model_id", type=str)
-    args.add_argument("dataset", type=str)
+    args.add_argument(
+        "dataset", type=str
+    )  # /home/pj24001684/ku40000295/jc/projects/usm/dataset_emo_jyutping
     args.add_argument("--output_dir", type=str, default="checkpoints")
     args = args.parse_args()
 

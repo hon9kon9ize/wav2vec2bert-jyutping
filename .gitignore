@@ -3,3 +3,9 @@ __pycache__
 checkpoints
 wandb
 dataset*
+*.out
+*.sh
+*.mp3
+*.wav
+*.json
+*_nodeinfo

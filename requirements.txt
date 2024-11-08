@@ -1,4 +1,7 @@
 transformers
-jiewer
+jiwer
 pycantonese
 numpy
+datasets==2.21.0
+librosa
+soundfile
