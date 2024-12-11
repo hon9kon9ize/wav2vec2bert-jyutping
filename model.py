@@ -121,6 +121,9 @@ class Wav2Vec2BertForCantonese(Wav2Vec2BertPreTrainedModel):
         tone_logits = self.tone_head(hidden_states)
 
         loss = None
+        jyutping_loss = None
+        tone_loss = None
+
         if jyutping_labels is not None and tone_labels is not None:
             # retrieve loss input_lengths from attention_mask
             attention_mask = (
@@ -357,6 +360,9 @@ class Wav2Vec2ForCantonese(Wav2Vec2PreTrainedModel):
         tone_logits = self.tone_head(hidden_states)
 
         loss = None
+        jyutping_loss = None
+        tone_loss = None
+
         if jyutping_labels is not None and tone_labels is not None:
             # retrieve loss input_lengths from attention_mask
             attention_mask = (
@@ -509,6 +515,9 @@ class Wav2Vec2ConformerForCantonese(Wav2Vec2ConformerPreTrainedModel):
         tone_logits = self.tone_head(hidden_states)
 
         loss = None
+        jyutping_loss = None
+        tone_loss = None
+
         if jyutping_labels is not None and tone_labels is not None:
             # retrieve loss input_lengths from attention_mask
             attention_mask = (

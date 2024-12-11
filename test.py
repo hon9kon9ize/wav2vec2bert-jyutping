@@ -1,7 +1,7 @@
 import os
 import argparse
 from model import Wav2Vec2BertForCantonese
-from data import DataCollatorCTCWithPadding
+from data import Wav2Vec2BertDataCollatorCTCWithPadding
 from datasets import load_metric, load_from_disk
 import time
 from transformers import (
@@ -74,7 +74,7 @@ def train(model_id: str, dataset: str):
         }
     )
 
-    data_collator = DataCollatorCTCWithPadding(processor=processor, padding=True)
+    data_collator = Wav2Vec2BertDataCollatorCTCWithPadding(processor=processor, padding=True)
     tone_tokenizer = Wav2Vec2CTCTokenizer(
         "tone_vocab.json",
         unk_token="[UNK]",
