@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from transformers import (
     Wav2Vec2BertModel,
@@ -22,12 +23,29 @@ from transformers.models.wav2vec2_conformer.modeling_wav2vec2_conformer import (
 )
 from transformers.modeling_outputs import ModelOutput
 from typing import Optional, Tuple, Union
-import numpy as np
+from modules.vq import Bottleneck
+from modules.jukebox import Encoder, Decoder
 import torch
 import torch.nn as nn
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class Quantizer(nn.Module):
+    def __init__(self, h):
+        super().__init__()
+
+        self.encoder = Encoder(**h["f0_encoder_params"])
+        self.vq = Bottleneck(**h["f0_vq_params"])
+        self.decoder = Decoder(**h["f0_decoder_params"])
+
+    def forward(self, **kwargs):
+        f0_h = self.encoder(kwargs["f0"])
+        _, f0_h_q, f0_commit_losses, f0_metrics = self.vq(f0_h)
+        f0 = self.decoder(f0_h_q)
+
+        return f0, f0_commit_losses, f0_metrics
 
 
 @dataclass
@@ -53,13 +71,50 @@ class Wav2Vec2BertForCantonese(Wav2Vec2BertPreTrainedModel):
     def __init__(
         self,
         config,
+        f0_path: str,
         tone_vocab_size: int = 9,
     ):
         super().__init__(config)
 
+        assert os.path.exists(f0_path), f"Cannot find f0_path: {f0_path}"
+
         self.wav2vec2_bert = Wav2Vec2BertModel(config)
         self.dropout = nn.Dropout(config.final_dropout)
         self.tone_vocab_size = tone_vocab_size
+        quantizer_params = {
+            "f0_vq_params": {
+                "l_bins": 20,
+                "emb_width": 128,
+                "mu": 0.99,
+                "levels": 1,
+            },
+            "f0_encoder_params": {
+                "input_emb_width": 1,
+                "output_emb_width": 128,
+                "levels": 1,
+                "downs_t": [4],
+                "strides_t": [2],
+                "width": 32,
+                "depth": 4,
+                "m_conv": 1.0,
+                "dilation_growth_rate": 3,
+            },
+            "f0_decoder_params": {
+                "input_emb_width": 1,
+                "output_emb_width": 128,
+                "levels": 1,
+                "downs_t": [4],
+                "strides_t": [2],
+                "width": 32,
+                "depth": 4,
+                "m_conv": 1.0,
+                "dilation_growth_rate": 3,
+            },
+        }
+        self.quantizer = Quantizer(quantizer_params)
+
+        # load pretrained f0 model
+        self.quantizer.load_state_dict(torch.load(f0_path))
 
         if config.vocab_size is None:
             raise ValueError(
@@ -597,82 +652,98 @@ if __name__ == "__main__":
     import torch
     import librosa
 
-    # from transformers import (
-    #     SeamlessM4TFeatureExtractor,
-    #     Wav2Vec2BertProcessor,
-    #     Wav2Vec2CTCTokenizer,
-    # )
-    # tokenizer = Wav2Vec2CTCTokenizer(
-    #     "vocab.json", unk_token="[UNK]", pad_token="[PAD]", word_delimiter_token="|"
-    # )
-    # feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained(
-    #     "facebook/w2v-bert-2.0"
-    # )
-    # processor = Wav2Vec2BertProcessor(
-    #     feature_extractor=feature_extractor, tokenizer=tokenizer
-    # )
-    # wav, sr = librosa.load("/notebooks/projects/wav2vec2-yue/test_nei1.wav", sr=16000)
+    from transformers import (
+        SeamlessM4TFeatureExtractor,
+        Wav2Vec2BertProcessor,
+        Wav2Vec2CTCTokenizer,
+    )
 
-    # input_features = processor(wav, sampling_rate=sr).input_features[0]
-
-    # model = Wav2Vec2BertForCantonese.from_pretrained(
-    #     "facebook/w2v-bert-2.0",
-    #     tone_vocab_size=6,
-    #     vocab_size=32,
-    #     attention_dropout=0.2,
-    #     hidden_dropout=0.2,
-    #     feat_proj_dropout=0.0,
-    #     mask_time_prob=0.0,
-    #     layerdrop=0.0,
-    #     ctc_loss_reduction="mean",
-    #     add_adapter=True,
-    #     pad_token_id=processor.tokenizer.pad_token_id,
-    # )
-
-    # print("input_features", input_features.shape)
-    # print(wav.shape)
-
-    # # Test forward pass
-    # input_features = torch.randn(1, 123, 160)
-    # jyutping_labels = torch.randint(0, 32, (1, 10))
-    # tone_labels = torch.randint(0, 6, (1, 10))
-    from transformers import Wav2Vec2Processor, Wav2Vec2CTCTokenizer
-
-    processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
     tokenizer = Wav2Vec2CTCTokenizer(
         "vocab.json", unk_token="[UNK]", pad_token="[PAD]", word_delimiter_token="|"
     )
-    processor = Wav2Vec2Processor(
-        feature_extractor=processor.feature_extractor, tokenizer=tokenizer
+    feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained(
+        "facebook/w2v-bert-2.0"
     )
-    model = Wav2Vec2ForCantonese.from_pretrained(
-        "TencentGameMate/chinese-hubert-base",
-        tone_vocab_size=6,
-        vocab_size=32,
-        ctc_loss_reduction="mean",
-        # pad_token_id=processor.tokenizer.pad_token_id,
-        # mask_time_prob=0.0,  # 0.05
-        # mask_time_length=10,  # 10
-        # mask_feature_prob=0.3,  # 0
-        # mask_feature_length=10,  # 10
+    processor = Wav2Vec2BertProcessor(
+        feature_extractor=feature_extractor, tokenizer=tokenizer
     )
-    # model.freeze_feature_extractor()
-
     wav, sr = librosa.load(
         "/home/pj24001684/ku40000295/jc/projects/wav2vec2bert-jyutping/test2.wav",
         sr=16000,
     )
 
-    input_values = processor(wav, sampling_rate=sr).input_values[0]
-    input_values = torch.from_numpy(input_values).unsqueeze(0)
-    # input_values = torch.randn(16000 * 10)
+    input_features = processor(wav, sampling_rate=sr).input_features[0]
+
+    model = Wav2Vec2BertForCantonese.from_pretrained(
+        "facebook/w2v-bert-2.0",
+        tone_vocab_size=6,
+        vocab_size=32,
+        f0_path="checkpoints/vctk_f0_vq_g_00400000",
+        attention_dropout=0.2,
+        hidden_dropout=0.2,
+        feat_proj_dropout=0.0,
+        mask_time_prob=0.0,
+        layerdrop=0.0,
+        ctc_loss_reduction="mean",
+        add_adapter=True,
+        pad_token_id=processor.tokenizer.pad_token_id,
+    )
+
+    print("input_features", input_features.shape)
+    print(wav.shape)
+
     jyutping_labels = torch.randint(0, 32, (1, 10))
     tone_labels = torch.randint(0, 6, (1, 10))
 
     output = model(
-        input_values,
+        input_features,
         jyutping_labels=jyutping_labels,
         tone_labels=tone_labels,
     )
 
     print(output.loss, output.jyutping_logits.shape, output.tone_logits.shape)
+
+    # # Test forward pass
+    # input_features = torch.randn(1, 123, 160)
+    # jyutping_labels = torch.randint(0, 32, (1, 10))
+    # tone_labels = torch.randint(0, 6, (1, 10))
+    # from transformers import Wav2Vec2Processor, Wav2Vec2CTCTokenizer
+
+    # processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
+    # tokenizer = Wav2Vec2CTCTokenizer(
+    #     "vocab.json", unk_token="[UNK]", pad_token="[PAD]", word_delimiter_token="|"
+    # )
+    # processor = Wav2Vec2Processor(
+    #     feature_extractor=processor.feature_extractor, tokenizer=tokenizer
+    # )
+    # model = Wav2Vec2ForCantonese.from_pretrained(
+    #     "TencentGameMate/chinese-hubert-base",
+    #     tone_vocab_size=6,
+    #     vocab_size=32,
+    #     ctc_loss_reduction="mean",
+    # pad_token_id=processor.tokenizer.pad_token_id,
+    # mask_time_prob=0.0,  # 0.05
+    # mask_time_length=10,  # 10
+    # mask_feature_prob=0.3,  # 0
+    # mask_feature_length=10,  # 10
+    # )
+    # model.freeze_feature_extractor()
+
+    # wav, sr = librosa.load(
+    #     "/home/pj24001684/ku40000295/jc/projects/wav2vec2bert-jyutping/test2.wav",
+    #     sr=16000,
+    # )
+
+    # input_values = processor(wav, sampling_rate=sr).input_values[0]
+    # input_values = torch.from_numpy(input_values).unsqueeze(0)
+    # # input_values = torch.randn(16000 * 10)
+    # jyutping_labels = torch.randint(0, 32, (1, 10))
+    # tone_labels = torch.randint(0, 6, (1, 10))
+
+    # output = model(
+    #     input_values,
+    #     jyutping_labels=jyutping_labels,
+    #     tone_labels=tone_labels,
+    # )
+
+    # print(output.loss, output.jyutping_logits.shape, output.tone_logits.shape)
