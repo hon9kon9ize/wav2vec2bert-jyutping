@@ -16,10 +16,66 @@ pip install -r requirements.txt
 
 ## Training
 
-To train the model, run the following command:
+The project supports two tone annotation formats:
+
+- Separate tone stream: the published two-head setup using `jyutping_labels` and `tone_labels`.
+- Nucleus+tone stream: a single CTC target where onsets stay tone-less and rimes carry tone, e.g. `maa4 maa1 go3` becomes `m aa4 m aa1 g o3`.
+
+To train the published two-head format, run:
 
 ```bash
-python train.py
+python train_w2v2bert.py facebook/w2v-bert-2.0 /path/to/dataset --output_dir checkpoints
+```
+
+To build the fallback nucleus+tone vocab from the existing tone-less vocab, run:
+
+```bash
+python build_nucleus_tone_vocab.py --output vocab_nucleus_tone.json
+```
+
+For a dataset-specific nucleus+tone vocab, use the default Hugging Face dataset:
+
+```bash
+python build_nucleus_tone_vocab.py --output vocab_nucleus_tone.json
+```
+
+This defaults to `indiejoseph/tts20250516`, using the `phone` column as inline toned Jyutping. The other TTS columns are ignored. You can also pass a local Hugging Face dataset path:
+
+```bash
+python build_nucleus_tone_vocab.py --dataset /path/to/dataset --output vocab_nucleus_tone.json
+```
+
+To train the single-head nucleus+tone format, run:
+
+```bash
+python train_w2v2bert_nucleus_tone.py facebook/w2v-bert-2.0 --output_dir checkpoints_nucleus_tone
+```
+
+This also defaults to `indiejoseph/tts20250516`, `--jyutping_column phone`, and `--annotation_type inline`. `train_w2v2bert_nucleus_tone.py` accepts `--annotation_type auto|inline|separate`. Use `inline` when the Jyutping column already contains tones such as `maa4 maa1`; use `separate` for an older Jyutping plus tone-column layout; `auto` chooses inline when it sees tone digits.
+
+To evaluate the published two-head checkpoint on the same deterministic split, run:
+
+```bash
+python eval_original_w2v2bert.py --split test --batch_size 1
+```
+
+The split is shuffled with seed 42, then assigned as 500 test samples, 500 validation samples, and the rest for training.
+
+Optional F0 conditioning can be enabled for tone experiments:
+
+```bash
+python train_w2v2bert_nucleus_tone.py facebook/w2v-bert-2.0 --use_f0 --output_dir checkpoints_nucleus_tone_f0
+```
+
+F0 is extracted with `librosa.pyin`, normalized per sample, interpolated to the Wav2Vec2-BERT encoder time axis, projected, and added before the CTC head.
+
+Smoke examples for the nucleus+tone tokenizer:
+
+```text
+maa4 maa1 go3 jiu4 juk6 zeoi3 -> m aa4 m aa1 g o3 j iu4 j uk6 z eoi3
+gwong2 dung1 waa2 -> gw ong2 d ung1 w aa2
+m4 goi1 -> m4 g oi1
+ng5 -> ng5
 ```
 
 ## Inference

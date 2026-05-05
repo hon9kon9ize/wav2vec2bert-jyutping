@@ -9,7 +9,6 @@ from transformers import (
     Wav2Vec2PreTrainedModel,
     Wav2Vec2Model,
 )
-from pycantonese.jyutping.parse_jyutping import ONSETS
 import re
 from transformers.models.wav2vec2_bert.modeling_wav2vec2_bert import (
     _HIDDEN_STATES_START_POSITION,
@@ -26,6 +25,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import logging
+from jyutping import ONSETS, nucleus_tone_text_to_jyutping
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,18 @@ class JuytpingOutput(ModelOutput):
     tone_logits: torch.FloatTensor = None
     jyutping_loss: Optional[torch.FloatTensor] = None
     tone_loss: Optional[torch.FloatTensor] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+
+
+@dataclass
+class JyutpingCTCOutput(ModelOutput):
+    """
+    Output type for single-head Jyutping CTC models.
+    """
+
+    loss: Optional[torch.FloatTensor] = None
+    logits: torch.FloatTensor = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
 
@@ -253,6 +265,157 @@ class Wav2Vec2BertForCantonese(Wav2Vec2BertPreTrainedModel):
             jyutping_logits,
             tone_logits,
         )
+
+
+class Wav2Vec2BertForJyutpingCTC(Wav2Vec2BertPreTrainedModel):
+    """
+    Wav2Vec2-BERT with one CTC head for nucleus+tone Jyutping labels.
+    """
+
+    def __init__(self, config, use_f0: bool = False):
+        super().__init__(config)
+
+        self.wav2vec2_bert = Wav2Vec2BertModel(config)
+        self.dropout = nn.Dropout(config.final_dropout)
+        config.use_f0 = use_f0
+
+        if config.vocab_size is None:
+            raise ValueError(
+                f"You are trying to instantiate {self.__class__} with a configuration "
+                "that does not define vocab_size."
+            )
+
+        output_hidden_size = (
+            config.output_hidden_size
+            if hasattr(config, "add_adapter") and config.add_adapter
+            else config.hidden_size
+        )
+        self.use_f0 = config.use_f0
+        self.f0_projection = (
+            nn.Linear(1, output_hidden_size) if self.use_f0 else None
+        )
+        self.lm_head = nn.Linear(output_hidden_size, config.vocab_size)
+
+        self.post_init()
+
+    def forward(
+        self,
+        input_features: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        labels: Optional[torch.Tensor] = None,
+        f0_features: Optional[torch.Tensor] = None,
+    ) -> Union[Tuple, JyutpingCTCOutput]:
+        if labels is not None and labels.max() >= self.config.vocab_size:
+            raise ValueError(
+                f"Label values must be <= vocab_size: {self.config.vocab_size}"
+            )
+
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
+
+        outputs = self.wav2vec2_bert(
+            input_features,
+            attention_mask=attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        hidden_states = outputs[0]
+        if self.use_f0 and f0_features is not None:
+            f0_features = f0_features.to(
+                device=hidden_states.device, dtype=hidden_states.dtype
+            )
+            voiced_mask = f0_features > 0
+            voiced_counts = voiced_mask.sum(dim=1, keepdim=True).clamp_min(1)
+            means = (f0_features * voiced_mask).sum(dim=1, keepdim=True) / voiced_counts
+            variances = (
+                ((f0_features - means) * voiced_mask).pow(2).sum(dim=1, keepdim=True)
+                / voiced_counts
+            )
+            f0_features = torch.where(
+                voiced_mask,
+                (f0_features - means) / torch.sqrt(variances + 1e-5),
+                torch.zeros_like(f0_features),
+            )
+            f0_features = nn.functional.interpolate(
+                f0_features.unsqueeze(1),
+                size=hidden_states.shape[1],
+                mode="linear",
+                align_corners=False,
+            ).transpose(1, 2)
+            hidden_states = hidden_states + self.f0_projection(f0_features)
+
+        hidden_states = self.dropout(hidden_states)
+        logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            attention_mask = (
+                attention_mask
+                if attention_mask is not None
+                else torch.ones(
+                    input_features.shape[:2],
+                    device=input_features.device,
+                    dtype=torch.long,
+                )
+            )
+            input_lengths = self._get_feat_extract_output_lengths(
+                attention_mask.sum([-1])
+            ).to(torch.long)
+
+            labels_mask = labels >= 0
+            target_lengths = labels_mask.sum(-1)
+            flattened_targets = labels.masked_select(labels_mask)
+
+            log_probs = nn.functional.log_softmax(
+                logits, dim=-1, dtype=torch.float32
+            ).transpose(0, 1)
+
+            with torch.backends.cudnn.flags(enabled=False):
+                loss = nn.functional.ctc_loss(
+                    log_probs,
+                    flattened_targets,
+                    input_lengths,
+                    target_lengths,
+                    blank=self.config.pad_token_id,
+                    reduction=self.config.ctc_loss_reduction,
+                    zero_infinity=self.config.ctc_zero_infinity,
+                )
+
+        if not return_dict:
+            output = (logits,) + outputs[_HIDDEN_STATES_START_POSITION:]
+            return ((loss,) + output) if loss is not None else output
+
+        return JyutpingCTCOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+    def inference(
+        self,
+        processor: Wav2Vec2BertProcessor,
+        input_features: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        f0_features: Optional[torch.Tensor] = None,
+    ):
+        outputs = self.forward(
+            input_features=input_features,
+            attention_mask=attention_mask,
+            f0_features=f0_features,
+            output_attentions=False,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+        pred_ids = torch.argmax(outputs.logits, dim=-1)
+        token_text = processor.batch_decode(pred_ids)[0]
+        return nucleus_tone_text_to_jyutping(token_text), outputs.logits
 
 
 class Wav2Vec2ForCantonese(Wav2Vec2PreTrainedModel):

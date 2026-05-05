@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from transformers import Wav2Vec2Processor, Wav2Vec2BertProcessor
 from dataclasses import dataclass
 from typing import Dict, List, Union, Optional
@@ -61,6 +62,59 @@ class Wav2Vec2BertDataCollatorCTCWithPadding:
 
         batch["jyutping_labels"] = jyutping_labels
         batch["tone_labels"] = tone_labels
+
+        return batch
+
+
+@dataclass
+class Wav2Vec2BertSingleDataCollatorCTCWithPadding:
+    processor: Wav2Vec2BertProcessor
+    padding: Union[bool, str] = True
+    max_length: Optional[int] = None
+    max_length_labels: Optional[int] = None
+    pad_to_multiple_of: Optional[int] = None
+    pad_to_multiple_of_labels: Optional[int] = None
+
+    def __call__(
+        self, features: List[Dict[str, Union[List[int], torch.Tensor]]]
+    ) -> Dict[str, torch.Tensor]:
+        input_features = [
+            {"input_features": feature["input_features"]} for feature in features
+        ]
+        label_features = [{"input_ids": feature["labels"]} for feature in features]
+
+        batch = self.processor.pad(
+            input_features,
+            padding=self.padding,
+            max_length=self.max_length,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors="pt",
+        )
+
+        labels_batch = self.processor.pad(
+            labels=label_features,
+            padding=self.padding,
+            max_length=self.max_length_labels,
+            pad_to_multiple_of=self.pad_to_multiple_of_labels,
+            return_tensors="pt",
+        )
+
+        batch["labels"] = labels_batch["input_ids"].masked_fill(
+            labels_batch.attention_mask.ne(1), -100
+        )
+
+        if "f0_features" in features[0]:
+            f0_features = [
+                torch.tensor(feature["f0_features"], dtype=torch.float32)
+                for feature in features
+            ]
+            max_f0_length = max(f0_feature.shape[0] for f0_feature in f0_features)
+            batch["f0_features"] = torch.stack(
+                [
+                    F.pad(f0_feature, (0, max_f0_length - f0_feature.shape[0]))
+                    for f0_feature in f0_features
+                ]
+            )
 
         return batch
 
