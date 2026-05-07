@@ -88,6 +88,9 @@ def train(
     precision: str,
     dataloader_num_workers: int,
     gradient_checkpointing: bool,
+    learning_rate: float,
+    warmup_steps: int,
+    max_grad_norm: float,
 ):
     from transformers import (
         SeamlessM4TFeatureExtractor,
@@ -220,9 +223,10 @@ def train(
         save_steps=1000,
         eval_steps=1000,
         logging_steps=100,
-        learning_rate=1e-3,
+        learning_rate=learning_rate,
         weight_decay=0.005,
-        warmup_steps=200,
+        warmup_steps=warmup_steps,
+        max_grad_norm=max_grad_norm,
         save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model="ser",
@@ -279,6 +283,9 @@ if __name__ == "__main__":
         help="RTX 3090 is usually fastest with fp16.",
     )
     parser.add_argument("--dataloader_num_workers", type=int, default=4)
+    parser.add_argument("--learning_rate", type=float, default=1e-3)
+    parser.add_argument("--warmup_steps", type=int, default=200)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument(
         "--group_by_length",
         action="store_true",
@@ -317,4 +324,7 @@ if __name__ == "__main__":
         args.precision,
         args.dataloader_num_workers,
         not args.no_gradient_checkpointing,
+        args.learning_rate,
+        args.warmup_steps,
+        args.max_grad_norm,
     )
