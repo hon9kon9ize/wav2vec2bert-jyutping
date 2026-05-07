@@ -67,6 +67,20 @@ def patch_added_tokens(tokenizer) -> None:
             )
 
 
+def get_ctc_output_length(input_length: int, config) -> int:
+    if not getattr(config, "add_adapter", False):
+        return input_length
+
+    output_length = input_length
+    padding = config.adapter_kernel_size // 2
+    for _ in range(config.num_adapter_layers):
+        output_length = (
+            output_length + 2 * padding - config.adapter_kernel_size
+        ) // config.adapter_stride + 1
+
+    return output_length
+
+
 def train(
     model_id: str,
     dataset: str,
@@ -98,6 +112,7 @@ def train(
         TrainingArguments,
         Wav2Vec2BertProcessor,
         Wav2Vec2CTCTokenizer,
+        Wav2Vec2BertConfig,
     )
 
     from data import Wav2Vec2BertSingleDataCollatorCTCWithPadding
@@ -134,6 +149,7 @@ def train(
     processor = Wav2Vec2BertProcessor(
         feature_extractor=feature_extractor, tokenizer=tokenizer
     )
+    model_config = Wav2Vec2BertConfig.from_pretrained(model_id, add_adapter=True)
 
     def prepare_dataset(batch):
         audio = batch["audio"]
@@ -141,6 +157,9 @@ def train(
             audio["array"], sampling_rate=audio["sampling_rate"]
         ).input_features[0]
         batch["input_lengths"] = len(batch["input_features"])
+        batch["output_lengths"] = get_ctc_output_length(
+            batch["input_lengths"], model_config
+        )
         if use_f0:
             batch["f0_features"] = extract_f0_features(
                 audio["array"], audio["sampling_rate"]
@@ -153,6 +172,7 @@ def train(
             annotation_type=annotation_type,
         )
         batch["labels"] = processor(text=label_text).input_ids
+        batch["label_lengths"] = len(batch["labels"])
 
         return batch
 
@@ -163,6 +183,21 @@ def train(
         num_proc=num_proc,
         remove_columns=remove_columns,
         desc="Preparing audio features and labels",
+    )
+    before_filter = {split: len(ds[split]) for split in ds}
+    ds = ds.filter(
+        lambda example: 0 < example["label_lengths"] <= example["output_lengths"],
+        num_proc=num_proc,
+        desc="Filtering CTC-impossible examples",
+    )
+    after_filter = {split: len(ds[split]) for split in ds}
+    print(
+        "Filtered CTC-impossible examples: "
+        + ", ".join(
+            f"{split}={before_filter[split] - after_filter[split]}"
+            for split in before_filter
+        ),
+        flush=True,
     )
     print("Preprocessing complete", flush=True)
 
@@ -176,6 +211,7 @@ def train(
         layerdrop=0.0,
         add_adapter=True,
         ctc_loss_reduction="mean",
+        ctc_zero_infinity=True,
         pad_token_id=processor.tokenizer.pad_token_id,
         vocab_size=len(processor.tokenizer),
         use_f0=use_f0,
