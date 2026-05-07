@@ -229,7 +229,9 @@ def train(
 
         pred_token_text = processor.batch_decode(pred_ids)
         label_token_text = processor.batch_decode(label_ids, group_tokens=False)
-        pred_jyutping = [nucleus_tone_text_to_jyutping(text) for text in pred_token_text]
+        pred_jyutping = [
+            nucleus_tone_text_to_jyutping(text) for text in pred_token_text
+        ]
         label_jyutping = [
             nucleus_tone_text_to_jyutping(text) for text in label_token_text
         ]
