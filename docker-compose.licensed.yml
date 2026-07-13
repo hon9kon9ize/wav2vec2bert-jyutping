@@ -1,0 +1,54 @@
+# Licensed CPU ONNX serving for wav2vec2-bert Jyutping.
+# The licensing-agent (from the license-server repo, pinned pubkey baked in)
+# verifies license.jwt, decrypts the encrypted model bundle into a tmpfs, and
+# the jyutping service loads the ONNX model from there. Plaintext weights live
+# only in RAM and are shredded when the license expires.
+#
+#   docker compose -f docker-compose.licensed.yml up -d
+#   curl -F file=@ref123.wav http://127.0.0.1:8091/phoneme
+name: jyutping-licensed
+
+services:
+  licensing-agent:
+    image: licensing-agent:1          # reused from the license-server deployment
+    restart: unless-stopped
+    user: "0:0"                       # writes plaintext into the tmpfs volume
+    network_mode: host                # host MAC for a stable fingerprint (CPU svc: no GPU)
+    command: ["python", "-m", "agent.main", "run", "--watch"]
+    volumes:
+      - ./identity:/data                     # persisted box keypair + request.json
+      - ./activation:/activation:ro          # license.jwt
+      - ./bundle:/bundle:ro                  # encrypted model bundle
+      - /etc/machine-id:/etc/machine-id:ro   # host machine-id (fingerprint)
+      - model-plain:/models                  # shared tmpfs, decrypted output
+    healthcheck:
+      test: ["CMD", "test", "-f", "/models/.ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 60
+
+  jyutping:
+    build:
+      context: .
+      dockerfile: Dockerfile.serve-onnx
+    image: jyutping-onnx:1
+    restart: unless-stopped
+    depends_on:
+      licensing-agent:
+        condition: service_healthy   # wait until the model is decrypted
+    ports:
+      - "127.0.0.1:${PORT:-8091}:8000"
+    environment:
+      MODEL_ONNX: /models/model.onnx     # decrypted fp32 model in tmpfs
+      PROCESSOR_DIR: /models             # decrypted feature extractor + tokenizer
+      ORT_THREADS: "0"                   # all CPU cores
+    volumes:
+      - model-plain:/models:ro
+
+volumes:
+  model-plain:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=4g       # plaintext model stays in RAM (fp32 ~2.4 GB)

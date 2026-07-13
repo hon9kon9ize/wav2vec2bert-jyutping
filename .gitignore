@@ -9,3 +9,7 @@ dataset*
 *.wav
 *.json
 *_nodeinfo
+tmp
+*.ipynb
+.venv/
+onnx/

@@ -1,0 +1,28 @@
+# CPU ONNX serving: 16 kHz .wav -> Jyutping phonemes.
+#
+#   1. export once:  python export_onnx.py   (creates onnx/model.onnx[.data])
+#   2. docker compose -f docker-compose.onnx.yml up -d --build
+#   3. curl -F file=@tmp/ref123.wav http://127.0.0.1:8090/phoneme
+#
+# The model and processor files are mounted read-only so they are not baked into
+# the image (keeps it small; fp32 weights are ~2.4 GB on the host).
+name: jyutping-onnx
+
+services:
+  jyutping:
+    build:
+      context: .
+      dockerfile: Dockerfile.serve-onnx
+    image: jyutping-onnx:1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PORT:-8090}:8000"
+    environment:
+      # fp32 (default) = fastest+accurate; set to /app/onnx/model.int8.onnx for
+      # a ~600 MB footprint at the cost of speed/accuracy.
+      MODEL_ONNX: /app/onnx/model.onnx
+      PROCESSOR_DIR: /app/processor
+      ORT_THREADS: "0"          # 0 = use all CPU cores
+    volumes:
+      - ./onnx:/app/onnx:ro                          # exported ONNX model(s)
+      - ./checkpoints/checkpoint-3048:/app/processor:ro   # feature extractor + tokenizer

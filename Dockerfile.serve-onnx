@@ -1,0 +1,29 @@
+# CPU ONNX serving image for wav2vec2-bert Jyutping (audio -> phonemes).
+# The ONNX model + processor files are MOUNTED at runtime (see
+# docker-compose.onnx.yml), so this image stays small — no torch, no weights.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+WORKDIR /app
+
+# soundfile needs libsndfile; onnxruntime/librosa are wheels.
+RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+        onnxruntime \
+        "transformers>=4.44,<5" \
+        numpy soundfile librosa \
+        fastapi "uvicorn[standard]" python-multipart
+
+COPY serve.py ./serve.py
+
+ENV MODEL_ONNX=/app/onnx/model.onnx \
+    PROCESSOR_DIR=/app/processor \
+    ORT_THREADS=0
+EXPOSE 8000
+
+HEALTHCHECK --interval=15s --timeout=3s --retries=20 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"
+
+CMD ["uvicorn", "serve:app", "--host", "0.0.0.0", "--port", "8000"]
