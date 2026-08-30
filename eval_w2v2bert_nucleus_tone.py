@@ -211,8 +211,22 @@ def evaluate(
                 return_dict=True,
             )
 
-        pred_ids = torch.argmax(outputs.logits, dim=-1).cpu()
-        batch_token_predictions = processor.batch_decode(pred_ids)
+        pred_ids = torch.argmax(outputs.logits, dim=-1)
+        if attention_mask is not None:
+            output_lengths = model._get_feat_extract_output_lengths(
+                attention_mask.sum(-1)
+            ).to(torch.long)
+        else:
+            output_lengths = torch.full(
+                (pred_ids.shape[0],),
+                pred_ids.shape[1],
+                device=pred_ids.device,
+                dtype=torch.long,
+            )
+        batch_token_predictions = [
+            processor.decode(ids[:length].cpu())
+            for ids, length in zip(pred_ids, output_lengths)
+        ]
 
         for row, token_prediction in zip(rows, batch_token_predictions):
             tone_text = row.get(tone_column)

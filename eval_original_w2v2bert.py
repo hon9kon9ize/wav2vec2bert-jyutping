@@ -188,10 +188,27 @@ def evaluate(
                 return_dict=True,
             )
 
-        jyutping_ids = torch.argmax(outputs.jyutping_logits, dim=-1).cpu()
-        tone_ids = torch.argmax(outputs.tone_logits, dim=-1).cpu()
-        batch_jyutping_predictions = processor.batch_decode(jyutping_ids)
-        batch_tone_predictions = tone_tokenizer.batch_decode(tone_ids)
+        jyutping_ids = torch.argmax(outputs.jyutping_logits, dim=-1)
+        tone_ids = torch.argmax(outputs.tone_logits, dim=-1)
+        if attention_mask is not None:
+            output_lengths = model._get_feat_extract_output_lengths(
+                attention_mask.sum(-1)
+            ).to(torch.long)
+        else:
+            output_lengths = torch.full(
+                (jyutping_ids.shape[0],),
+                jyutping_ids.shape[1],
+                device=jyutping_ids.device,
+                dtype=torch.long,
+            )
+        batch_jyutping_predictions = [
+            processor.decode(ids[:length].cpu())
+            for ids, length in zip(jyutping_ids, output_lengths)
+        ]
+        batch_tone_predictions = [
+            tone_tokenizer.decode(ids[:length].cpu())
+            for ids, length in zip(tone_ids, output_lengths)
+        ]
 
         for row, jyutping_prediction, tone_prediction in zip(
             rows, batch_jyutping_predictions, batch_tone_predictions
