@@ -110,6 +110,7 @@ def train(
     max_grad_norm: float,
     eval_steps: int,
     head_learning_rate: float = None,
+    mix_datasets: list = None,
 ):
     from transformers import (
         SeamlessM4TFeatureExtractor,
@@ -123,14 +124,40 @@ def train(
     from data import Wav2Vec2BertSingleDataCollatorCTCWithPadding
     from model import Wav2Vec2BertForJyutpingCTC
 
+    from datasets import Audio, DatasetDict, concatenate_datasets
+
     print(f"Loading dataset: {dataset}", flush=True)
     ds = make_train_validation_test_split(load_any_dataset(dataset))
+    # The feature extractor needs 16 kHz audio; datasets resamples on decode.
+    ds = DatasetDict(
+        {k: v.cast_column("audio", Audio(sampling_rate=16_000)) for k, v in ds.items()}
+    )
     print(
         "Split sizes: "
         f"train={len(ds['train'])}, validation={len(ds['validation'])}, test={len(ds['test'])}",
         flush=True,
     )
+    if mix_datasets:
+        # Extra corpora join the TRAIN split only, so the validation/test split of the
+        # primary dataset stays exactly as before and results remain comparable.
+        parts = [ds["train"].select_columns(["audio", jyutping_column])]
+        for spec in mix_datasets:
+            path, _, column = spec.partition(":")
+            column = column or jyutping_column
+            extra = load_any_dataset(path)
+            if isinstance(extra, DatasetDict):
+                extra = extra["train"]  # the extra dataset's own test split stays unused
+            extra = extra.select_columns(["audio", column])
+            if column != jyutping_column:
+                extra = extra.rename_column(column, jyutping_column)
+            extra = extra.cast_column("audio", Audio(sampling_rate=16_000))
+            print(f"  mixing in {path}: {len(extra)} clips (labels from '{column}')", flush=True)
+            parts.append(extra)
+        ds["train"] = concatenate_datasets(parts)
+        print(f"Mixed train size: {len(ds['train'])}", flush=True)
     if max_train_samples:
+        if mix_datasets:
+            ds["train"] = ds["train"].shuffle(seed=42)
         ds["train"] = ds["train"].select(
             range(min(max_train_samples, len(ds["train"])))
         )
@@ -158,15 +185,16 @@ def train(
 
     def prepare_dataset(batch):
         audio = batch["audio"]
-        batch["input_features"] = processor(
+        out = {}
+        out["input_features"] = processor(
             audio["array"], sampling_rate=audio["sampling_rate"]
         ).input_features[0]
-        batch["input_lengths"] = len(batch["input_features"])
-        batch["output_lengths"] = get_ctc_output_length(
-            batch["input_lengths"], model_config
+        out["input_lengths"] = len(out["input_features"])
+        out["output_lengths"] = get_ctc_output_length(
+            out["input_lengths"], model_config
         )
         if use_f0:
-            batch["f0_features"] = extract_f0_features(
+            out["f0_features"] = extract_f0_features(
                 audio["array"], audio["sampling_rate"]
             )
 
@@ -179,10 +207,11 @@ def train(
         # Map tokens -> ids directly. processor(text=" ".join(...)) would turn every
         # space into the "|" word delimiter, putting one between each onset and its
         # rime and roughly doubling the target length.
-        batch["labels"] = tokenizer.convert_tokens_to_ids(label_tokens)
-        batch["label_lengths"] = len(batch["labels"])
+        out["labels"] = tokenizer.convert_tokens_to_ids(label_tokens)
+        out["label_lengths"] = len(out["labels"])
 
-        return batch
+        # Return only what training needs (not the raw audio), so the cached dataset stays small.
+        return out
 
     print(f"Preprocessing dataset with num_proc={num_proc}", flush=True)
     remove_columns = ds["train"].column_names
@@ -340,6 +369,18 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_steps", type=int, default=200)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument(
+        "--mix_dataset",
+        action="append",
+        default=None,
+        metavar="PATH[:LABEL_COLUMN]",
+        help=(
+            "Add another dataset to the TRAIN split (repeatable). Its own 'train' split is used "
+            "(or the whole dataset if it has no splits), its audio is resampled to 16 kHz, and "
+            "LABEL_COLUMN (default: --jyutping_column) must hold inline toned jyutping, e.g. "
+            "dataset_emo_jyutping:labels. Validation/test stay those of the primary dataset."
+        ),
+    )
+    parser.add_argument(
         "--head_learning_rate",
         type=float,
         default=None,
@@ -400,4 +441,5 @@ if __name__ == "__main__":
         args.max_grad_norm,
         args.eval_steps,
         args.head_learning_rate,
+        args.mix_dataset,
     )
