@@ -157,7 +157,7 @@ def annotation_to_legacy_texts(
     return jyutping_text, tone_text
 
 
-def annotation_to_nucleus_tone_text(
+def annotation_to_toned_jyutping(
     jyutping_text: str, tone_text: str = None, annotation_type: str = "auto"
 ) -> str:
     if annotation_type not in {"auto", "inline", "separate"}:
@@ -166,13 +166,44 @@ def annotation_to_nucleus_tone_text(
     if annotation_type == "inline" or (
         annotation_type == "auto" and re.search(r"[1-6]", jyutping_text)
     ):
-        toned_jyutping = jyutping_text
-    else:
-        if tone_text is None:
-            raise ValueError("tone_text is required for separate tone annotations")
-        toned_jyutping = separate_tone_annotation_to_jyutping(jyutping_text, tone_text)
+        return jyutping_text
 
-    return jyutping_to_nucleus_tone_text(toned_jyutping)
+    if tone_text is None:
+        raise ValueError("tone_text is required for separate tone annotations")
+    return separate_tone_annotation_to_jyutping(jyutping_text, tone_text)
+
+
+def annotation_to_nucleus_tone_text(
+    jyutping_text: str, tone_text: str = None, annotation_type: str = "auto"
+) -> str:
+    return jyutping_to_nucleus_tone_text(
+        annotation_to_toned_jyutping(jyutping_text, tone_text, annotation_type)
+    )
+
+
+def jyutping_to_nucleus_tone_label_tokens(text: str) -> List[str]:
+    """CTC label tokens: onset / rime+tone pieces, with "|" between syllables only.
+
+    "maa4 maa1 go3" -> ["m", "aa4", "|", "m", "aa1", "|", "g", "o3"]
+
+    Feed these to ``tokenizer.convert_tokens_to_ids`` directly. Encoding the
+    space-joined text with ``processor(text=...)`` instead turns every space into
+    "|", which also lands between each onset and its rime.
+    """
+    tokens: List[str] = []
+    for syllable in normalize_jyutping_text(text).split():
+        if tokens:
+            tokens.append("|")
+        tokens.extend(split_nucleus_tone_syllable(syllable))
+    return tokens
+
+
+def annotation_to_nucleus_tone_label_tokens(
+    jyutping_text: str, tone_text: str = None, annotation_type: str = "auto"
+) -> List[str]:
+    return jyutping_to_nucleus_tone_label_tokens(
+        annotation_to_toned_jyutping(jyutping_text, tone_text, annotation_type)
+    )
 
 
 def nucleus_tone_tokens_to_jyutping(tokens: Iterable[str]) -> str:

@@ -9,6 +9,7 @@ import numpy as np
 import soundfile as sf
 import torch
 
+from ctc_utils import ctc_ids_to_token_text
 from dataset_utils import (
     DEFAULT_DATASET,
     load_any_dataset,
@@ -224,7 +225,7 @@ def evaluate(
                 dtype=torch.long,
             )
         batch_token_predictions = [
-            processor.decode(ids[:length].cpu())
+            ctc_ids_to_token_text(tokenizer, ids.cpu().tolist(), int(length))
             for ids, length in zip(pred_ids, output_lengths)
         ]
 

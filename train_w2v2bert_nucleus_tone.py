@@ -8,7 +8,10 @@ os.environ["USE_FLAX"] = "0"
 
 import numpy as np
 
-from jyutping import annotation_to_nucleus_tone_text, nucleus_tone_text_to_jyutping
+from jyutping import (
+    annotation_to_nucleus_tone_label_tokens,
+    nucleus_tone_text_to_jyutping,
+)
 from dataset_utils import (
     DEFAULT_DATASET,
     load_any_dataset,
@@ -105,16 +108,18 @@ def train(
     learning_rate: float,
     warmup_steps: int,
     max_grad_norm: float,
+    eval_steps: int,
+    head_learning_rate: float = None,
 ):
     from transformers import (
         SeamlessM4TFeatureExtractor,
-        Trainer,
         TrainingArguments,
         Wav2Vec2BertProcessor,
         Wav2Vec2CTCTokenizer,
         Wav2Vec2BertConfig,
     )
 
+    from ctc_utils import LengthAwareTrainer, ctc_ids_to_token_text
     from data import Wav2Vec2BertSingleDataCollatorCTCWithPadding
     from model import Wav2Vec2BertForJyutpingCTC
 
@@ -166,12 +171,15 @@ def train(
             )
 
         tone_text = batch.get(tone_column)
-        label_text = annotation_to_nucleus_tone_text(
+        label_tokens = annotation_to_nucleus_tone_label_tokens(
             batch[jyutping_column],
             tone_text=tone_text,
             annotation_type=annotation_type,
         )
-        batch["labels"] = processor(text=label_text).input_ids
+        # Map tokens -> ids directly. processor(text=" ".join(...)) would turn every
+        # space into the "|" word delimiter, putting one between each onset and its
+        # rime and roughly doubling the target length.
+        batch["labels"] = tokenizer.convert_tokens_to_ids(label_tokens)
         batch["label_lengths"] = len(batch["labels"])
 
         return batch
@@ -222,13 +230,19 @@ def train(
     )
 
     def compute_metrics(pred):
-        pred_ids = np.argmax(pred.predictions, axis=-1)
-        label_ids = np.where(
-            pred.label_ids == -100, processor.tokenizer.pad_token_id, pred.label_ids
-        )
+        # LengthAwareTrainer gives (logits, output_lengths); only the first
+        # output_length frames of each clip are real, the rest is batch padding.
+        logits, output_lengths = pred.predictions
+        pred_ids = np.argmax(logits, axis=-1)
 
-        pred_token_text = processor.batch_decode(pred_ids)
-        label_token_text = processor.batch_decode(label_ids, group_tokens=False)
+        pred_token_text = [
+            ctc_ids_to_token_text(tokenizer, ids, length)
+            for ids, length in zip(pred_ids, output_lengths)
+        ]
+        label_token_text = [
+            ctc_ids_to_token_text(tokenizer, ids, collapse=False)
+            for ids in pred.label_ids
+        ]
         pred_jyutping = [
             nucleus_tone_text_to_jyutping(text) for text in pred_token_text
         ]
@@ -258,8 +272,8 @@ def train(
         dataloader_num_workers=dataloader_num_workers,
         dataloader_pin_memory=True,
         overwrite_output_dir=True,
-        save_steps=1000,
-        eval_steps=1000,
+        save_steps=eval_steps,
+        eval_steps=eval_steps,
         logging_steps=100,
         learning_rate=learning_rate,
         weight_decay=0.005,
@@ -273,7 +287,8 @@ def train(
         run_name="wav2vec2-yue-nucleus-tone" + time.strftime("%Y-%m-%d-%H-%M-%S"),
     )
 
-    trainer = Trainer(
+    trainer = LengthAwareTrainer(
+        head_learning_rate=head_learning_rate,
         model=model,
         data_collator=data_collator,
         args=training_args,
@@ -325,6 +340,24 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_steps", type=int, default=200)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument(
+        "--head_learning_rate",
+        type=float,
+        default=None,
+        help=(
+            "Separate learning rate for the output head. With the syllable-pipe labels "
+            "and a small batch, one learning rate for everything stays on the all-blank "
+            "plateau; a validated recipe is --learning_rate 5e-5 --head_learning_rate 1e-3 "
+            "--per_device_train_batch_size 16. Larger batches are untested: watch the "
+            "first 300 steps."
+        ),
+    )
+    parser.add_argument(
+        "--eval_steps",
+        type=int,
+        default=1000,
+        help="Evaluate and save a checkpoint every this many steps.",
+    )
+    parser.add_argument(
         "--group_by_length",
         action="store_true",
         help="Enable length-grouped sampling. This can be slow with some Transformers versions.",
@@ -365,4 +398,6 @@ if __name__ == "__main__":
         args.learning_rate,
         args.warmup_steps,
         args.max_grad_norm,
+        args.eval_steps,
+        args.head_learning_rate,
     )
