@@ -103,6 +103,11 @@ class Wav2Vec2BertSingleDataCollatorCTCWithPadding:
             labels_batch.attention_mask.ne(1), -100
         )
 
+        if "lang_id" in features[0]:
+            batch["lang_ids"] = torch.tensor(
+                [f["lang_id"] for f in features], dtype=torch.long
+            )
+
         if "f0_features" in features[0]:
             f0_features = [
                 torch.tensor(feature["f0_features"], dtype=torch.float32)

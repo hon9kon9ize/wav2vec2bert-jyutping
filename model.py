@@ -307,6 +307,7 @@ class Wav2Vec2BertForJyutpingCTC(Wav2Vec2BertPreTrainedModel):
         return_dict: Optional[bool] = None,
         labels: Optional[torch.Tensor] = None,
         f0_features: Optional[torch.Tensor] = None,
+        lang_ids: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, JyutpingCTCOutput]:
         if labels is not None and labels.max() >= self.config.vocab_size:
             raise ValueError(
@@ -352,6 +353,11 @@ class Wav2Vec2BertForJyutpingCTC(Wav2Vec2BertPreTrainedModel):
 
         hidden_states = self.dropout(hidden_states)
         logits = self.lm_head(hidden_states)
+
+        if lang_ids is not None and hasattr(self, "lang_masks"):
+            # suppress tokens that don't belong to each example's language
+            mask = self.lang_masks[lang_ids]  # (batch, vocab_size)
+            logits = logits.masked_fill(~mask.unsqueeze(1), float("-inf"))
 
         loss = None
         if labels is not None:
