@@ -13,3 +13,8 @@ tmp
 *.ipynb
 .venv/
 onnx/
+
+# experiment output folders (checkpoints_*/ can be many GB) and vocab files, which *.json would otherwise hide
+checkpoints_*/
+!vocab*.json
+!tone_vocab.json
