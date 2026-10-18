@@ -272,6 +272,33 @@ class Wav2Vec2BertForJyutpingCTC(Wav2Vec2BertPreTrainedModel):
     Wav2Vec2-BERT with one CTC head for nucleus+tone Jyutping labels.
     """
 
+    # Merger-aware smoothing (off by default, training only, not saved): see set_merger_smoothing().
+    merger_smoothing = 0.0
+    merger_partner_ids = None
+
+    def set_merger_smoothing(self, eps: float, partner_ids: torch.Tensor):
+        """Keep a share of the probability on the merger-partner tones at the frames where the model emits a rime+tone token.
+
+        partner_ids is a LongTensor (vocab_size, k): for every token id the ids of its partner tokens (the same rime with the
+        tone it merges with: 2<->5, 3<->6, 4<->6), padded with -1. During training the extra loss
+        eps * mean(-log p(partner)) is added at every frame whose arg-max token has partners, so the posterior keeps a few
+        percent on the partner instead of collapsing to a one-hot choice (graded targets for the Mok & Wong merger pairs).
+        """
+        self.merger_smoothing = float(eps)
+        self.merger_partner_ids = partner_ids
+
+    def _merger_smoothing_loss(self, log_probs_tbv: torch.Tensor, input_lengths: torch.Tensor) -> torch.Tensor:
+        lp = log_probs_tbv.transpose(0, 1)                                  # (B, T, V)
+        partners = self.merger_partner_ids.to(lp.device)
+        with torch.no_grad():
+            pid = partners[lp.argmax(-1)]                                   # (B, T, k)
+            valid = torch.arange(lp.shape[1], device=lp.device)[None, :] < input_lengths[:, None]
+            mask = (pid >= 0) & valid[:, :, None]
+        gathered = lp.gather(-1, pid.clamp(min=0))                          # (B, T, k)
+        per_frame = -(gathered * mask).sum(-1) / mask.sum(-1).clamp(min=1)
+        frames = mask.any(-1)
+        return per_frame[frames].mean() if frames.any() else lp.sum() * 0.0
+
     def __init__(self, config, use_f0: bool = False):
         super().__init__(config)
 
@@ -386,6 +413,8 @@ class Wav2Vec2BertForJyutpingCTC(Wav2Vec2BertPreTrainedModel):
                     reduction=self.config.ctc_loss_reduction,
                     zero_infinity=self.config.ctc_zero_infinity,
                 )
+            if self.training and self.merger_smoothing > 0 and self.merger_partner_ids is not None:
+                loss = loss + self.merger_smoothing * self._merger_smoothing_loss(log_probs, input_lengths)
 
         if not return_dict:
             output = (logits,) + outputs[_HIDDEN_STATES_START_POSITION:]

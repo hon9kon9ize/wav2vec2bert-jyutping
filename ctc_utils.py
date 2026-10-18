@@ -122,3 +122,22 @@ class LengthAwareTrainer(HeadLRMixin, Trainer):
                 inputs["attention_mask"].sum(-1)
             ).to(device=logits.device, dtype=torch.long)
         return loss, (logits, lengths), labels
+
+
+MERGER_PARTNER_TONES = {"2": ["5"], "5": ["2"], "3": ["6"], "6": ["3", "4"], "4": ["6"]}
+
+
+def merger_partner_ids(tokenizer, vocab_size=None):
+    """LongTensor (vocab_size, 2): for every rime+tone token the ids of the same rime with its merger-partner tone
+    (2<->5, 3<->6, 4<->6; Mok & Wong 2010), padded with -1."""
+    import torch
+
+    vocab = tokenizer.get_vocab()
+    n = vocab_size or len(tokenizer)
+    out = torch.full((n, 2), -1, dtype=torch.long)
+    for tok, i in vocab.items():
+        if i < n and len(tok) > 1 and tok[-1] in MERGER_PARTNER_TONES and tok[:-1].isalpha():
+            ids = [vocab[tok[:-1] + t] for t in MERGER_PARTNER_TONES[tok[-1]] if tok[:-1] + t in vocab]
+            for k, j in enumerate(ids[:2]):
+                out[i, k] = j
+    return out

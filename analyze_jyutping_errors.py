@@ -23,7 +23,7 @@ from jyutping import (
 
 
 DEFAULT_PUBLISHED_MODEL_ID = "hon9kon9ize/wav2vec2bert-jyutping"
-DEFAULT_CHECKPOINT_MODEL_ID = "checkpoints/checkpoint-1524"
+DEFAULT_CHECKPOINT_MODEL_ID = "checkpoints/run21_40000"
 DEFAULT_BASE_MODEL_ID = "facebook/w2v-bert-2.0"
 
 
