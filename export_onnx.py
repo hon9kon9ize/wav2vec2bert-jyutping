@@ -1,11 +1,11 @@
-"""Export checkpoints/checkpoint-3048 (Wav2Vec2BertForJyutpingCTC) to ONNX for
+"""Export checkpoints/run22_8000 (Wav2Vec2BertForJyutpingCTC) to ONNX for
 CPU serving, then INT8-quantize and verify parity with the PyTorch model.
 
-    python export_onnx.py --ckpt checkpoints/checkpoint-3048 --out onnx
+    python export_onnx.py --ckpt checkpoints/run22_8000 --out onnx/run22
 
 Produces:
-    onnx/model.onnx        fp32 graph (input_features, attention_mask -> logits)
-    onnx/model.int8.onnx   dynamic INT8 quantized (smaller/faster on CPU)
+    onnx/run22/model.onnx        fp32 graph (input_features, attention_mask -> logits)
+    onnx/run22/model.int8.onnx   dynamic INT8 quantized (smaller/faster on CPU)
 
 The graph emits raw CTC logits; decoding (argmax + collapse) is done in Python
 at serve time with the checkpoint's Wav2Vec2CTCTokenizer.
@@ -44,8 +44,8 @@ class LogitsOnly(nn.Module):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", default="checkpoints/checkpoint-3048")
-    ap.add_argument("--out", default="onnx")
+    ap.add_argument("--ckpt", default="checkpoints/run22_8000")
+    ap.add_argument("--out", default="onnx/run22")
     ap.add_argument("--opset", type=int, default=17)
     ap.add_argument("--dummy-seconds", type=float, default=2.0)
     args = ap.parse_args()

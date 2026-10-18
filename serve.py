@@ -21,9 +21,9 @@ from transformers import Wav2Vec2BertProcessor
 
 # fp32 is both faster and more accurate than dynamic-INT8 for this conformer on
 # CPU (INT8 measured ~2x slower with a tiny accuracy drop). Override with
-# MODEL_ONNX=onnx/model.int8.onnx only if you need the smaller ~600 MB footprint.
-MODEL_ONNX = os.environ.get("MODEL_ONNX", "onnx/model.onnx")
-PROCESSOR_DIR = os.environ.get("PROCESSOR_DIR", "checkpoints/checkpoint-3048")
+# MODEL_ONNX=onnx/run22/model.int8.onnx only if you need the smaller ~600 MB footprint.
+MODEL_ONNX = os.environ.get("MODEL_ONNX", "onnx/run22/model.onnx")
+PROCESSOR_DIR = os.environ.get("PROCESSOR_DIR", "checkpoints/run22_8000")
 TARGET_SR = 16000
 
 _NP = {"tensor(int32)": np.int32, "tensor(int64)": np.int64,

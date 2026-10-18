@@ -1,6 +1,6 @@
 # CPU ONNX serving: 16 kHz .wav -> Jyutping phonemes.
 #
-#   1. export once:  python export_onnx.py   (creates onnx/model.onnx[.data])
+#   1. export once:  python export_onnx.py   (creates onnx/run22/model.onnx[.data])
 #   2. docker compose -f docker-compose.onnx.yml up -d --build
 #   3. curl -F file=@tmp/ref123.wav http://127.0.0.1:8090/phoneme
 #
@@ -24,5 +24,5 @@ services:
       PROCESSOR_DIR: /app/processor
       ORT_THREADS: "0"          # 0 = use all CPU cores
     volumes:
-      - ./onnx:/app/onnx:ro                          # exported ONNX model(s)
-      - ./checkpoints/checkpoint-3048:/app/processor:ro   # feature extractor + tokenizer
+      - ./onnx/run22:/app/onnx:ro                    # exported ONNX model(s) of run22
+      - ./checkpoints/run22_8000:/app/processor:ro    # feature extractor + tokenizer

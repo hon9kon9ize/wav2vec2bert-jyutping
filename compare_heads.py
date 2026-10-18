@@ -216,6 +216,42 @@ class HeadCompareCollator:
         return batch
 
 
+# --------------------------------------------------------------------------- sequential feature building
+def stored_positions(n):
+    """(perm, position) of the fixed shuffle (seed 42) that makes the train/validation/test split: shuffled position p is stored row
+    perm[p], and stored row r sits at shuffled position position[r]. Checked against Dataset.shuffle by the caller."""
+    perm = np.random.default_rng(42).permutation(n)
+    position = np.empty(n, dtype=np.int64)
+    position[perm] = np.arange(n)
+    return perm, position
+
+
+def select_features(dataset, want, phone_column, prepare, num_proc):
+    """Features of the stored rows in `want` ({row: (kind, key)}), computed while the dataset is read in its stored order.
+
+    `dataset.select(indices)` of the shuffled split is random access, which runs at ~5 clips/s on genkai's Lustre; reading all rows
+    in order is fast and only the wanted ones are featurised, with the same `prepare` function as the normal path."""
+    from datasets import Features, Sequence, Value
+
+    def build(batch, rows):
+        out = {"input_features": [], "output_lengths": [], "phone": [], "kind": [], "key": []}
+        for j, row in enumerate(rows):
+            if row not in want:
+                continue
+            done = prepare({"audio": batch["audio"][j]})
+            out["input_features"].append(done["input_features"])
+            out["output_lengths"].append(done["output_lengths"])
+            out["phone"].append(batch[phone_column][j])
+            out["kind"].append(want[row][0])
+            out["key"].append(want[row][1])
+        return out
+
+    features = Features({"input_features": Sequence(Sequence(Value("float32"))), "output_lengths": Value("int64"),
+                         "phone": Value("string"), "kind": Value("int8"), "key": Value("int64")})
+    return dataset.map(build, batched=True, batch_size=64, with_indices=True, num_proc=num_proc,
+                       remove_columns=dataset.column_names, features=features, desc="features of the wanted rows")
+
+
 # --------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
@@ -248,6 +284,36 @@ def main():
         help='"|" only between syllables (new) or between every token (what processor(text=...) used to produce).',
     )
     ap.add_argument("--head_lr_mult", type=float, default=1.0, help="Learning-rate multiplier for the output head(s).")
+    ap.add_argument("--extra_train_dir", action="append", default=None,
+                    help="directory with manifest.json (file, phone) and wavs, e.g. synth_tts.py output; its clips are added to the "
+                         "training subset (repeatable). Features are cached under the cache dir by directory name.")
+    ap.add_argument("--extra_train_limit", type=int, default=0,
+                    help="use only the first N clips of every --extra_train_dir (after the voice filter)")
+    ap.add_argument("--extra_train_ref_prefix", default=None,
+                    help="keep only the extra training clips whose voice (manifest 'ref') starts with this prefix; use 'ref' to leave out "
+                         "the voices of the labelled evaluation wavs, whose speaker would otherwise leak into training")
+    ap.add_argument("--train_indices", default=None,
+                    help="JSON list of indices into the fixed train split to train on instead of its first --train_clips clips "
+                         "(make_relabel_experiment.py); their features are cached under the file's name")
+    ap.add_argument("--extra_train_hf", default=None, metavar="PATH:COLUMN",
+                    help="add rows of another Hugging Face dataset (its train split) to the training subset, e.g. dataset_emo_jyutping:labels; "
+                         "audio is resampled to 16 kHz, features are cached under the cache dir by name")
+    ap.add_argument("--extra_train_hf_indices", default=None, help="JSON list of the rows of --extra_train_hf to use (default: all)")
+    ap.add_argument("--train_top_layers", type=int, default=0,
+                    help="train only the top N encoder layers, the adapter and the head(s) and freeze everything below (the weights, gradients and "
+                         "AdamW state of a full fine-tune do not fit an 11 GB MIG slice); 0 = train everything")
+    ap.add_argument("--sequential_features", action="store_true",
+                    help="with --train_indices / --extra_train_hf_indices: read the stored datasets in order and featurise only the wanted rows "
+                         "(identical features; use it where random access is slow, e.g. genkai's Lustre)")
+    ap.add_argument("--repeat_indices", default=None,
+                    help="JSON list of train-split indices (needs --train_indices) whose clips are repeated --repeat_times times in training")
+    ap.add_argument("--repeat_times", type=int, default=2, help="how often a --repeat_indices clip appears in the training data in total")
+    ap.add_argument("--group_by_length", action="store_true", help="length-grouped batches (faster, less padding)")
+    ap.add_argument("--phone_override", default=None,
+                    help="JSON {train-split index: toned jyutping} that replaces the label of those clips (needs --train_indices)")
+    ap.add_argument("--merger_smoothing", type=float, default=0.0,
+                    help="single design only: weight of the merger-aware smoothing loss (keeps a share of the probability on the "
+                         "merger-partner tones 2/5, 3/6, 4/6 at the frames where the model emits a token); 0 = off.")
     args = ap.parse_args()
 
     from transformers import (
@@ -283,28 +349,110 @@ def main():
     feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained(args.model_id)
     processor = Wav2Vec2BertProcessor(feature_extractor=feature_extractor, tokenizer=tok_main)
     config = Wav2Vec2BertConfig.from_pretrained(args.model_id, add_adapter=True)
-    sizes = {"train": args.train_clips, "validation": args.val_clips, "test": args.test_clips}
-    feat_root = os.path.join(args.cache_dir, f"feat_{sizes['train']}_{sizes['validation']}_{sizes['test']}")
+    train_indices = json.load(open(args.train_indices)) if args.train_indices else None
+    if args.phone_override and train_indices is None:
+        raise SystemExit("--phone_override needs --train_indices")
+    sizes = {"train": len(train_indices) if train_indices else args.train_clips, "validation": args.val_clips, "test": args.test_clips}
+    train_tag = os.path.splitext(os.path.basename(args.train_indices))[0] + f"{len(train_indices)}" if train_indices else str(sizes["train"])
+    feat_root = os.path.join(args.cache_dir, f"feat_{train_tag}_{sizes['validation']}_{sizes['test']}")
 
     def prepare_features(batch):
         audio = batch["audio"]
         feats = feature_extractor(audio["array"], sampling_rate=audio["sampling_rate"]).input_features[0]
         return {"input_features": feats, "output_lengths": ctc_output_length(len(feats), config)}
 
-    if not all(os.path.isdir(os.path.join(feat_root, k)) for k in sizes):
+    if not all(os.path.isdir(os.path.join(feat_root, k)) for k in sizes) and args.sequential_features and train_indices is not None:
+        from dataset_utils import flatten_dataset
+
+        flat = flatten_dataset(load_any_dataset(args.dataset))
+        perm, position = stored_positions(len(flat))
+        phones = flat.select_columns(["phone"])
+        shuffled = phones.shuffle(seed=42)
+        for p in (0, 1, len(flat) // 3, len(flat) // 2, len(flat) - 1):
+            assert shuffled[p] == phones[int(perm[p])], f"the permutation differs from Dataset.shuffle at {p}"
+        want = {int(perm[src + 1000]): (1, int(src)) for src in train_indices}  # the first 1,000 shuffled rows are test and validation
+        want.update({int(perm[q]): (3, q) for q in range(args.test_clips)})
+        want.update({int(perm[500 + q]): (2, 500 + q) for q in range(args.val_clips)})
+        everything = select_features(flat, want, "phone", prepare_features, args.num_proc)
+        for kind, name in ((1, "train"), (2, "validation"), (3, "test")):
+            part = everything.filter(lambda k: k == kind, input_columns=["kind"], num_proc=args.num_proc, desc=f"{name} rows")
+            part = part.remove_columns(["kind"])
+            part = part.rename_column("key", "src_idx") if kind == 1 else part.sort("key").remove_columns(["key"])
+            part.save_to_disk(os.path.join(feat_root, name))
+    elif not all(os.path.isdir(os.path.join(feat_root, k)) for k in sizes):
         splits = make_train_validation_test_split(load_any_dataset(args.dataset), seed=42)
         for k, n in sizes.items():
-            part = splits[k].select(range(n))
+            part = splits[k].select(train_indices if (k == "train" and train_indices) else range(n))
+            if k == "train" and train_indices:
+                part = part.add_column("src_idx", list(train_indices))
             part = part.map(
                 prepare_features,
                 num_proc=args.num_proc,
-                remove_columns=[c for c in part.column_names if c != "phone"],
+                remove_columns=[c for c in part.column_names if c not in ("phone", "src_idx")],
                 desc=f"features {k}",
             )
             part.save_to_disk(os.path.join(feat_root, k))
     else:
         print(f"using cached features in {feat_root}", flush=True)
     ds = {k: load_from_disk(os.path.join(feat_root, k)) for k in sizes}
+    if args.phone_override:
+        override = {int(k): v for k, v in json.load(open(args.phone_override)).items()}
+        ds["train"] = ds["train"].map(lambda e: {"phone": override.get(e["src_idx"], e["phone"])}, desc="phone override")
+        print(f"  {sum(i in override for i in ds['train']['src_idx'])} training labels overridden", flush=True)
+    for extra in args.extra_train_dir or []:
+        from datasets import Audio, Dataset, concatenate_datasets
+
+        tag = os.path.basename(os.path.normpath(extra)) + (f"_{args.extra_train_ref_prefix}" if args.extra_train_ref_prefix else "") \
+            + (f"_first{args.extra_train_limit}" if args.extra_train_limit else "")
+        cache = os.path.join(args.cache_dir, f"extra_{tag}")
+        if not os.path.isdir(cache):
+            man = json.load(open(os.path.join(extra, "manifest.json")))
+            if args.extra_train_ref_prefix:
+                kept = [m for m in man if str(m.get("ref", "")).startswith(args.extra_train_ref_prefix)]
+                print(f"  {extra}: keeping {len(kept)} of {len(man)} clips (voice prefix '{args.extra_train_ref_prefix}')", flush=True)
+                man = kept
+            if args.extra_train_limit:
+                man = man[: args.extra_train_limit]
+            part = Dataset.from_dict({"audio": [os.path.join(extra, m["file"]) for m in man], "phone": [m["phone"] for m in man]})
+            part = part.cast_column("audio", Audio(sampling_rate=16_000))
+            part = part.map(prepare_features, num_proc=args.num_proc, remove_columns=["audio"], desc=f"features {tag}")
+            part.save_to_disk(cache)
+        part = load_from_disk(cache)
+        print(f"  extra training clips from {extra}: {len(part)}", flush=True)
+        ds["train"] = concatenate_datasets([ds["train"], part])
+
+    if args.extra_train_hf:
+        from datasets import Audio, concatenate_datasets
+
+        path, _, column = args.extra_train_hf.partition(":")
+        rows = json.load(open(args.extra_train_hf_indices)) if args.extra_train_hf_indices else None
+        tag = "hf_" + os.path.basename(os.path.normpath(path)) + (
+            f"_{os.path.splitext(os.path.basename(args.extra_train_hf_indices))[0]}{len(rows)}" if rows else "")
+        cache = os.path.join(args.cache_dir, f"extra_{tag}")
+        if not os.path.isdir(cache):
+            extra = load_any_dataset(path)
+            extra = extra["train"] if hasattr(extra, "keys") else extra
+            if args.sequential_features and rows is not None:
+                extra = extra.select_columns(["audio", column]).cast_column("audio", Audio(sampling_rate=16_000))
+                done = select_features(extra, {int(r): (1, int(r)) for r in rows}, column, prepare_features, args.num_proc)
+                done.remove_columns(["kind", "key"]).save_to_disk(cache)
+            else:
+                if rows is not None:
+                    extra = extra.select(rows)
+                extra = extra.select_columns(["audio", column]).rename_column(column, "phone").cast_column("audio", Audio(sampling_rate=16_000))
+                extra.map(prepare_features, num_proc=args.num_proc, remove_columns=["audio"], desc=f"features {tag}").save_to_disk(cache)
+        part = load_from_disk(cache)
+        if "src_idx" in ds["train"].column_names:
+            part = part.add_column("src_idx", [-1] * len(part))
+        print(f"  extra training clips from {path}: {len(part)}", flush=True)
+        ds["train"] = concatenate_datasets([ds["train"], part])
+    if args.repeat_indices:
+        from datasets import concatenate_datasets
+
+        again = set(json.load(open(args.repeat_indices)))
+        repeated = ds["train"].filter(lambda i: i in again, input_columns=["src_idx"], num_proc=args.num_proc, desc="repeated clips")
+        ds["train"] = concatenate_datasets([ds["train"]] + [repeated] * (args.repeat_times - 1))
+        print(f"  {len(repeated)} clips appear {args.repeat_times} times: training clips {len(ds['train'])}", flush=True)
 
     def prepare_labels(batch):
         main_tokens = piece_tokens(batch["phone"]) if design == "two_head" else jyutping_to_nucleus_tone_label_tokens(batch["phone"])
@@ -333,12 +481,32 @@ def main():
     )
     if design == "single":
         model = Wav2Vec2BertForJyutpingCTC.from_pretrained(args.model_id, **common)
+        if args.merger_smoothing > 0:
+            from ctc_utils import merger_partner_ids
+
+            pid = merger_partner_ids(tok_main, len(tok_main))
+            model.set_merger_smoothing(args.merger_smoothing, pid)
+            print(f"  merger-aware smoothing {args.merger_smoothing}: {int((pid[:, 0] >= 0).sum())} tokens have partner tones", flush=True)
     elif design == "two_head":
         model = Wav2Vec2BertForCantonese.from_pretrained(args.model_id, tone_vocab_size=len(tok_tone), **common)
     else:
         model = Wav2Vec2BertForJyutpingCTCAuxTone.from_pretrained(
             args.model_id, tone_vocab_size=len(tok_tone), aux_tone_weight=args.aux_weight, **common
         )
+    if args.train_top_layers:
+        cut = config.num_hidden_layers - args.train_top_layers
+
+        def frozen(name):
+            if name.startswith(("wav2vec2_bert.feature_projection", "wav2vec2_bert.masked_spec_embed")):
+                return True
+            layer = re.match(r"wav2vec2_bert\.encoder\.layers\.(\d+)\.", name)
+            return bool(layer) and int(layer.group(1)) < cut
+
+        for name, param in model.named_parameters():
+            param.requires_grad = not frozen(name)
+        print(f"  training the top {args.train_top_layers} of {config.num_hidden_layers} encoder layers + adapter + head: "
+              f"{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.0f}M of "
+              f"{sum(p.numel() for p in model.parameters()) / 1e6:.0f}M parameters", flush=True)
     n_params = {n: p.numel() for n, p in model.named_parameters() if "head" in n}
     print(f"  head parameters: {n_params}", flush=True)
 
@@ -363,6 +531,10 @@ def main():
         bf16=args.precision == "bf16",
         fp16=args.precision == "fp16",
         gradient_checkpointing=not args.no_gradient_checkpointing,
+        # with frozen lower layers the checkpointed upper layers get inputs without grad: only the non-reentrant mode passes gradients on
+        **({"gradient_checkpointing_kwargs": {"use_reentrant": False}} if args.train_top_layers else {}),
+        group_by_length=args.group_by_length,
+        length_column_name="output_lengths",
         dataloader_num_workers=args.dataloader_num_workers,
         logging_steps=25,
         report_to="none",
