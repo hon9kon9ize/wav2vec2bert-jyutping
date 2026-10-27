@@ -2,7 +2,8 @@
 
     python apply_relabel_rules.py --decoded <decoded_train.jsonl> --tojyutping_path <dir> [--out_dir tmp/label_mining/relabel_full]
 
---decoded is a decode of the training clips (decode_train.py; the 20k decode of mine_label_disagreements.py has the same fields).
+--simplified maps the simplified forms of the rule characters (为 会 时 无 议 间 别) to the traditional ones the rules are written with; use it for
+dataset_emo_jyutping, whose text is simplified. --decoded is a decode of the training clips (decode_train.py; the 20k decode of mine_label_disagreements.py has the same fields).
 A rule changes a label syllable when its character has the rule's old reading and, for `model` rules, the model's syllable at
 that position is the corrected reading. Writes to --out_dir:
   corrected_labels.json   {train-split index: corrected toned jyutping} for every clip a rule changes
@@ -17,6 +18,7 @@ import sys
 from collections import Counter
 
 REPO = os.path.dirname(os.path.abspath(__file__))
+SIMPLIFIED = {"为": "為", "会": "會", "时": "時", "无": "無", "议": "議", "间": "間", "别": "別"}  # only the characters that rules cover
 sys.path.insert(0, REPO)
 
 from error_consistency import align  # noqa: E402
@@ -29,6 +31,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--decoded", required=True)
     ap.add_argument("--tojyutping_path", default=None)
+    ap.add_argument("--simplified", action="store_true", help="the text is simplified script (dataset_emo_jyutping)")
     ap.add_argument("--out_dir", default=os.path.join(OUT_DIR, "relabel_full"))
     args = ap.parse_args()
     if args.tojyutping_path:
@@ -46,6 +49,8 @@ def main():
         if pairs is None:
             skipped += 1
             continue
+        if args.simplified:
+            pairs = [(SIMPLIFIED.get(char, char), label) for char, label in pairs]
         fixed, model_at = list(clip["gold"]), None
         for i, (char, label) in enumerate(pairs):
             for to, when in by_label.get((char, label), ()):

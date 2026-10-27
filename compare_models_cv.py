@@ -23,6 +23,24 @@ sys.path.insert(0, QWEN)
 import compare_jyutping as cj  # noqa: E402
 
 PARTICLES = set("啊呀吖啦喇嘞囉咯囖")
+from jyutping import split_nucleus_tone_syllable  # noqa: E402  (this repo's token split: onset + rime/nucleus+tone)
+
+
+def tokens(syllable):
+    try:
+        return split_nucleus_tone_syllable(syllable)
+    except ValueError:  # not a valid toned syllable
+        return [syllable]
+
+
+def token_distance(a, b):
+    prev = list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        cur = [i]
+        for j, y in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (x != y)))
+        prev = cur
+    return prev[-1]
 REPO = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -31,21 +49,30 @@ def load_preds(path):
 
 
 def score(row, pred, drop_particles):
-    """(reference syllables counted, strict errors, reading errors, hard errors, per-character hard errors) of one clip, as in
+    """(reference syllables counted, strict errors, reading errors, hard errors, per-character hard errors, reference tokens, token errors)
+    of one clip; the token errors (PER, strict: every difference from ToJyutping's reading) are the token edit distances inside the syllable
+    alignment, so PER and SER describe the same alignment. Syllable part as in
     compare_jyutping.score_clip: strict = hard + merger + other readings, reading = hard + merger, hard = substitutions that are not a
     merger pair + deleted + inserted syllables"""
     ref, chars = row["ref"], row["chars"]
     ops = cj.align(ref, pred["pred"], row["cands"])
-    n = strict = reading = hard = 0
+    n = strict = reading = hard = tok_n = tok_err = 0
     per_char = Counter()
     for op, i, j in ops:
         if op == "I":
             strict += 1; reading += 1; hard += 1
+            tok_err += len(tokens(pred["pred"][j]))
             continue
         char = chars[i] if i < len(chars) else "?"
         if drop_particles and char in PARTICLES:
             continue
         n += 1
+        ref_tokens = tokens(ref[i])
+        tok_n += len(ref_tokens)
+        if op == "D":
+            tok_err += len(ref_tokens)
+        elif op != "M":
+            tok_err += token_distance(ref_tokens, tokens(pred["pred"][j]))
         if op == "M":
             continue
         strict += 1
@@ -55,7 +82,7 @@ def score(row, pred, drop_particles):
         if op == "D" or cj.classify(ref[i], pred["pred"][j]) != "merger":
             hard += 1
             per_char[char] += 1
-    return n, strict, reading, hard, per_char
+    return n, strict, reading, hard, per_char, tok_n, tok_err
 
 
 def main():
@@ -86,19 +113,22 @@ def main():
         for src in ("cv", "cvo", "all"):
             ids = [c for c, r in rows.items() if src == "all" or r["src"] == src]
             n = sum(per_clip[c][name_a][0] for c in ids)
-            for k, level in ((1, "strict"), (2, "reading"), (3, "hard")):
+            n_tok = sum(per_clip[c][name_a][5] for c in ids)
+            for k, level in ((1, "strict"), (2, "reading"), (3, "hard"), (6, "PER")):
                 ea = sum(per_clip[c][name_a][k] for c in ids)
                 eb = sum(per_clip[c][name_b][k] for c in ids)
+                n_ref = n_tok if k == 6 else n
                 rng = random.Random(0)
                 diffs = []
-                deltas = [(per_clip[c][name_b][k] - per_clip[c][name_a][k], per_clip[c][name_a][0]) for c in ids]
+                deltas = [(per_clip[c][name_b][k] - per_clip[c][name_a][k], per_clip[c][name_a][5 if k == 6 else 0]) for c in ids]
                 for _ in range(args.bootstrap):
                     s = [deltas[rng.randrange(len(deltas))] for _ in deltas]
                     diffs.append(sum(d for d, _ in s) / max(sum(m for _, m in s), 1))
                 diffs.sort()
                 lo, hi = diffs[int(0.025 * len(diffs))], diffs[int(0.975 * len(diffs))]
-                print(f"{src:8} {len(ids):6d} {n:10d} | {level:8} {ea / n:12.2%} {eb / n:12.2%} {(eb - ea) / n:+11.2%}  {lo:+.2%} to {hi:+.2%}")
-                summary[f"{label}/{src}/{level}"] = {name_a: ea / n, name_b: eb / n, "diff": (eb - ea) / n, "ci": [lo, hi], "syllables": n}
+                print(f"{src:8} {len(ids):6d} {n:10d} | {level:8} {ea / n_ref:12.2%} {eb / n_ref:12.2%} {(eb - ea) / n_ref:+11.2%}  {lo:+.2%} to {hi:+.2%}")
+                summary[f"{label}/{src}/{level}"] = {name_a: ea / n_ref, name_b: eb / n_ref, "diff": (eb - ea) / n_ref, "ci": [lo, hi],
+                                                     "syllables": n, "tokens": n_tok}
         if drop:
             ca, cb, occ = Counter(), Counter(), Counter()
             for cid, r in rows.items():
